@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Fornos do Brasil – Mapa com filtros</title>
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<style>
+  :root{ --bg:#0b0d10; --card:#11151a; --ink:#e8ecf1; --muted:#9aa4af; --line:#233041; --accent:#4f8cff; }
+  body{margin:0;background:var(--bg);color:var(--ink);font:500 16px/1.5 system-ui,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+  header{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,var(--bg),rgba(11,13,16,.85));backdrop-filter:saturate(1.2) blur(6px);border-bottom:1px solid var(--line)}
+  .wrap{max-width:1152px;margin:0 auto;padding:14px 16px;display:grid;gap:12px}
+  .controls{display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:8px}
+  .controls input,.controls select,.controls button{
+    background:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:10px 12px;
+  }
+  .controls button{cursor:pointer}
+  .pill{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+  .pill input[type="checkbox"]{transform:scale(1.2)}
+  #map{height:calc(100dvh - 160px)}
+  footer{border-top:1px solid var(--line);background:var(--bg)}
+  footer .wrap{padding:10px 16px;color:var(--muted);font-size:13px}
+  .badge{display:inline-block;background:rgba(79,140,255,.15);color:var(--accent);border:1px solid rgba(79,140,255,.35);padding:2px 8px;border-radius:999px;font-size:12px}
+  .counter{color:var(--muted);font-size:13px}
+  @media (max-width:900px){ .controls{grid-template-columns:1fr 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <h1 style="margin:0;font-size:20px">Fornos do Brasil <span class="badge" id="count">0</span></h1>
+      <div class="counter" id="meta">carregando…</div>
+    </div>
+    <div class="controls">
+      <input id="q" type="search" placeholder="Buscar por nome/descrição da marcação">
+      <select id="layer"><option value="">Todas as camadas</option></select>
+      <div class="pill">
+        <input id="near" type="checkbox">
+        <label for="near">Perto de mim</label>
+      </div>
+      <button id="clear">Limpar</button>
+    </div>
+  </div>
+</header>
+
+<div id="map"></div>
+
+<footer>
+  <div class="wrap">
+    Fonte: Google My Maps. Mantenha o mapa compartilhado (link público) para o site atualizar.
+  </div>
+</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://unpkg.com/@tmcw/togeojson@5.7.0/dist/togeojson.umd.js"></script>
+
+<script>
+const MIDX = "1Mhb5gI33KRZn9tJDwZ7uJfjOAFtqmUY"; // seu mid
+const KML_URL = `https://www.google.com/maps/d/kml?mid=${MIDX}&forcekml=1`;
+
+const map = L.map('map').setView([-14.2, -51.9], 4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
+const cluster = L.markerClusterGroup();
+
+let allFeatures = [];   // GeoJSON Features
+let markers = [];
+let userLoc = null;
+
+const els = {
+  q: document.getElementById('q'),
+  layer: document.getElementById('layer'),
+  near: document.getElementById('near'),
+  clear: document.getElementById('clear'),
+  meta: document.getElementById('meta'),
+  count: document.getElementById('count'),
+};
+
+function norm(s){ return (s||'').toString().normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim(); }
+
+function buildPopup(props){
+  const name = props.name || 'Sem título';
+  // description pode vir com HTML do My Maps
+  const desc = props.description ? `<div>${props.description}</div>` : '';
+  const folder = props._folder || '';
+  return `<div style="min-width:240px">
+    <strong style="font-size:16px">${name}</strong>
+    ${folder ? `<div style="opacity:.7">Camada: ${folder}</div>` : ''}
+    ${desc}
+    <div style="margin-top:6px;opacity:.7;font-size:12px">Origem: Google My Maps</div>
+  </div>`;
+}
+
+function featureToMarker(f){
+  const [lng, lat] = f.geometry.coordinates; // KML→GeoJSON: [lng,lat]
+  const m = L.marker([lat,lng]).bindPopup(buildPopup(f.properties));
+  m._layerName = f.properties._folder || '';
+  m._searchBlob = norm(`${f.properties.name||''} ${f.properties.description||''} ${m._layerName}`);
+  return m;
+}
+
+function applyFilters(){
+  const q = norm(els.q.value);
+  const layerFilter = els.layer.value;
+  const near = els.near.checked;
+
+  cluster.clearLayers();
+  markers = [];
+
+  for (const f of allFeatures){
+    if (layerFilter && (f.properties._folder||'') !== layerFilter) continue;
+
+    if (q){
+      const blob = f._searchBlob;
+      if (!blob.includes(q)) continue;
+    }
+
+    if (near && userLoc){
+      const [lng, lat] = f.geometry.coordinates;
+      const km = 50; // raio fixo de 50 km (ajuste se quiser criar um controle)
+      if (!withinRadius(userLoc.lat, userLoc.lng, lat, lng, km)) continue;
+    }
+
+    const m = featureToMarker(f);
+    cluster.addLayer(m);
+    markers.push(m);
+  }
+
+  map.addLayer(cluster);
+  els.count.textContent = markers.length;
+
+  if (markers.length){
+    const group = L.featureGroup(markers);
+    map.fitBounds(group.getBounds().pad(0.2));
+  }
+}
+
+function withinRadius(lat1, lon1, lat2, lon2, km){
+  const R=6371, toRad = d=>d*Math.PI/180;
+  const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return (2*R*Math.asin(Math.sqrt(a))) <= km;
+}
+
+function populateLayerFilter(){
+  const set = new Set(allFeatures.map(f => f.properties._folder || '').filter(Boolean));
+  els.layer.innerHTML = '<option value="">Todas as camadas</option>' +
+    [...set].sort((a,b)=>a.localeCompare(b)).map(n=>`<option>${n}</option>`).join('');
+}
+
+function extractFolderNames(geo){
+  // KML → GeoJSON pode perder nomes de pastas. togeojson mantém em properties@name nos Folders/Placemarks.
+  // Vamos percorrer a estrutura original (KML XML) para mapear placemark → folder.
+}
+
+async function loadKML(){
+  try{
+    const resp = await fetch(KML_URL);
+    if (!resp.ok) throw new Error('Falha ao baixar KML');
+    const text = await resp.text();
+    const xml = new DOMParser().parseFromString(text, 'text/xml');
+    const gj = toGeoJSON.kml(xml);
+
+    // mapeia folder (Layer) para cada Placemark
+    const folderMap = new Map(); // placemarkName -> folderName
+    const folders = [...xml.getElementsByTagName('Folder')];
+    folders.forEach(F=>{
+      const fname = (F.getElementsByTagName('name')[0]?.textContent || '').trim();
+      const pms = [...F.getElementsByTagName('Placemark')];
+      pms.forEach(P=>{
+        const pname = (P.getElementsByTagName('name')[0]?.textContent || '').trim();
+        if (pname) folderMap.set(pname, fname);
+      });
+    });
+
+    allFeatures = (gj.features||[])
+      .filter(f => f.geometry && f.geometry.type === 'Point')
+      .map(f => {
+        // injeta nome da camada (folder) quando possível
+        const nm = (f.properties?.name || '').trim();
+        f.properties = f.properties || {};
+        f.properties._folder = folderMap.get(nm) || '';
+        f._searchBlob = norm(`${f.properties.name||''} ${f.properties.description||''} ${f.properties._folder||''}`);
+        return f;
+      });
+
+    populateLayerFilter();
+    applyFilters();
+
+    els.meta.textContent = `Camadas: ${[...new Set(allFeatures.map(f=>f.properties._folder).filter(Boolean))].length} • Pontos: ${allFeatures.length}`;
+  }catch(e){
+    console.error(e);
+    els.meta.textContent = 'Erro ao carregar o KML. Confirme se o My Maps está público.';
+  }
+}
+
+els.q.addEventListener('input', applyFilters);
+els.layer.addEventListener('change', applyFilters);
+els.clear.addEventListener('click', ()=>{
+  els.q.value=''; els.layer.value='';
+  els.near.checked=false;
+  applyFilters();
+});
+els.near.addEventListener('change', ()=>{
+  if (!els.near.checked){ applyFilters(); return; }
+  if (!navigator.geolocation){ alert('Seu navegador não permite geolocalização.'); els.near.checked=false; return; }
+  navigator.geolocation.getCurrentPosition(pos=>{
+    userLoc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    applyFilters();
+  }, _=>{ alert('Não foi possível obter sua localização.'); els.near.checked=false; });
+});
+
+loadKML();
+</script>
+</body>
+</html>
